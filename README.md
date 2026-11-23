@@ -6,7 +6,7 @@ One-command installer for self-hosted [n8n](https://n8n.io) on AlmaLinux / RHEL 
 
 | Service | What it does |
 |---|---|
-| `n8n` | n8n (installed with npm), listening on `127.0.0.1:5678` only |
+| `n8n` | n8n (installed with npm on Node.js 24 from nodejs.org), listening on `127.0.0.1:5678` only |
 | `postgresql` | n8n's database (local only) |
 | `caddy` | Public HTTPS on ports 80/443 with automatic Let's Encrypt certificates, proxying to n8n |
 

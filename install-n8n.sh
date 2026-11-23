@@ -28,17 +28,35 @@ fi
 
 log() { echo -e "\n\033[1;34m==> $*\033[0m"; }
 
-# ---------------------------------------------------------------- packages
-log "Installing base packages, Node.js and PostgreSQL"
-dnf -y install openssl curl bind-utils gcc-c++ make python3 \
-  nodejs npm postgresql-server postgresql
+# sudo on RHEL drops /usr/local/bin from PATH; Node.js and Caddy live there.
+export PATH="/usr/local/bin:$PATH"
+NODE_LINE="24"   # n8n 2.x requires Node.js >= 24
 
-NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]')"
-echo "Node.js version: $(node -v)"
-if (( NODE_MAJOR < 20 || NODE_MAJOR > 24 )); then
-  echo "n8n needs Node.js 20-24, found $(node -v). Install a supported Node.js and re-run." >&2
-  exit 1
+# ---------------------------------------------------------------- packages
+log "Installing base packages and PostgreSQL"
+dnf -y install openssl curl bind-utils gcc-c++ make python3 tar xz \
+  postgresql-server postgresql
+
+# ---------------------------------------------------------------- Node.js
+# Distro Node.js is too old for current n8n, so install the official
+# Node.js $NODE_LINE LTS build from nodejs.org into /usr/local.
+CUR_MAJOR="$( [[ -x /usr/local/bin/node ]] && /usr/local/bin/node -p 'process.versions.node.split(".")[0]' || echo 0 )"
+if (( CUR_MAJOR < NODE_LINE )); then
+  log "Installing Node.js $NODE_LINE from nodejs.org"
+  case "$(uname -m)" in x86_64) NARCH=x64;; aarch64) NARCH=arm64;; *) echo "Unsupported CPU $(uname -m)" >&2; exit 1;; esac
+  NODE_DIST="https://nodejs.org/dist/latest-v${NODE_LINE}.x"
+  TMP="$(mktemp -d)"
+  curl -fsSL "$NODE_DIST/SHASUMS256.txt" -o "$TMP/SHASUMS256.txt"
+  NODE_TAR="$(grep -oE "node-v[0-9.]+-linux-${NARCH}\.tar\.xz" "$TMP/SHASUMS256.txt" | head -n1)"
+  curl -fsSL "$NODE_DIST/$NODE_TAR" -o "$TMP/$NODE_TAR"
+  (cd "$TMP" && grep " $NODE_TAR\$" SHASUMS256.txt | sha256sum -c -)
+  tar -xJf "$TMP/$NODE_TAR" -C /usr/local --strip-components=1 --no-same-owner
+  rm -rf "$TMP"
+  # Any n8n built against an older Node must be rebuilt.
+  rm -rf /usr/local/lib/node_modules/n8n /usr/local/bin/n8n
 fi
+hash -r
+echo "Node.js $(node -v), npm $(npm -v) at $(command -v node)"
 
 # ---------------------------------------------------------------- firewall
 log "Opening ports 80 and 443"
@@ -112,8 +130,9 @@ fi
 
 # ---------------------------------------------------------------- n8n
 log "Installing n8n (this can take a few minutes)"
-npm install -g n8n@latest --no-fund --no-audit
-N8N_BIN="$(command -v n8n)"
+npm install -g n8n@latest --no-fund --no-audit --loglevel=error
+N8N_BIN="/usr/local/bin/n8n"
+[[ -x "$N8N_BIN" ]] || { echo "n8n install failed - see npm output above." >&2; exit 1; }
 echo "n8n $("$N8N_BIN" --version) installed at $N8N_BIN"
 
 id n8n >/dev/null 2>&1 || useradd --system --home-dir "$DATA_DIR" --create-home --shell /sbin/nologin n8n
@@ -133,6 +152,7 @@ User=n8n
 Group=n8n
 WorkingDirectory=$DATA_DIR
 Environment=HOME=$DATA_DIR
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
 EnvironmentFile=$ENV_FILE
 ExecStart=$N8N_BIN start
 Restart=always
