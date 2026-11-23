@@ -37,6 +37,19 @@ log "Installing base packages and PostgreSQL"
 dnf -y install openssl curl bind-utils gcc-c++ make python3 tar xz \
   postgresql-server postgresql
 
+# ---------------------------------------------------------------- swap
+# n8n's native module builds are memory-hungry; add 2 GB swap on small VMs.
+if [[ -z "$(swapon --show --noheadings)" ]]; then
+  log "No swap found - creating a 2 GB swap file"
+  if [[ ! -f /swapfile ]]; then
+    fallocate -l 2G /swapfile || dd if=/dev/zero of=/swapfile bs=1M count=2048
+    chmod 600 /swapfile
+    mkswap /swapfile
+  fi
+  swapon /swapfile
+  grep -q '^/swapfile ' /etc/fstab || echo '/swapfile none swap defaults 0 0' >> /etc/fstab
+fi
+
 # ---------------------------------------------------------------- Node.js
 # Distro Node.js is too old for current n8n, so install the official
 # Node.js $NODE_LINE LTS build from nodejs.org into /usr/local.
@@ -119,11 +132,14 @@ systemctl enable postgresql
 systemctl restart postgresql
 
 cd /tmp
+# Password goes in via stdin, so it never shows up in `ps` output.
 if sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname='n8n'" | grep -q 1; then
-  sudo -u postgres psql -qc "ALTER ROLE n8n WITH LOGIN PASSWORD '$PG_PASS';"
+  ROLE_SQL="ALTER ROLE n8n WITH LOGIN PASSWORD '$PG_PASS';"
 else
-  sudo -u postgres psql -qc "CREATE ROLE n8n WITH LOGIN PASSWORD '$PG_PASS';"
+  ROLE_SQL="CREATE ROLE n8n WITH LOGIN PASSWORD '$PG_PASS';"
 fi
+printf '%s\n' "$ROLE_SQL" | sudo -u postgres psql -q -v ON_ERROR_STOP=1
+unset ROLE_SQL
 if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_database WHERE datname='n8n'" | grep -q 1; then
   sudo -u postgres createdb -O n8n n8n
 fi
@@ -167,7 +183,14 @@ EOF
 log "Installing Caddy (HTTPS reverse proxy)"
 if ! command -v caddy >/dev/null 2>&1; then
   ARCH="$(uname -m)"; case "$ARCH" in x86_64) ARCH=amd64;; aarch64) ARCH=arm64;; esac
-  curl -fsSL "https://caddyserver.com/api/download?os=linux&arch=$ARCH" -o /usr/local/bin/caddy
+  curl -fsSL "https://caddyserver.com/api/download?os=linux&arch=$ARCH" -o /tmp/caddy.download
+  # Normally a raw binary; unpack it if a tar.gz ever comes back instead.
+  if [[ "$(head -c2 /tmp/caddy.download | od -An -tx1 | tr -d ' ')" == "1f8b" ]]; then
+    tar -xzf /tmp/caddy.download -C /usr/local/bin caddy
+  else
+    mv /tmp/caddy.download /usr/local/bin/caddy
+  fi
+  rm -f /tmp/caddy.download
   chmod 755 /usr/local/bin/caddy
   command -v restorecon >/dev/null 2>&1 && restorecon -v /usr/local/bin/caddy || true
 fi
